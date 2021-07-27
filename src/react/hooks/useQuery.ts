@@ -50,27 +50,9 @@ interface ObservableQueryOptions<TData, TVariables> {
 };
 
 class QueryData<TData, TVariables> {
-  public isMounted: boolean = false;
+  public isMounted: boolean;
   public context: any = {};
   private options = {} as QueryDataOptions<TData, TVariables>;
-
-  // TODO: This is still called by ssr stuff ;_;
-  public getOptions(): QueryDataOptions<TData, TVariables> {
-    return this.options;
-  }
-
-  public setOptions(newOptions: QueryDataOptions<TData, TVariables>) {
-    if (!equal(this.options, newOptions)) {
-      this.previous.options = this.options;
-    }
-
-    this.options = newOptions;
-  }
-
-  private unmount() {
-    this.isMounted = false;
-  }
-
   private onNewData: () => void;
   private currentObservable?: ObservableQuery<TData, TVariables>;
   private currentSubscription?: ObservableSubscription;
@@ -96,64 +78,36 @@ class QueryData<TData, TVariables> {
     this.options = options || ({} as QueryDataOptions<TData, TVariables>);
     this.context = context || {};
     this.onNewData = onNewData;
+    this.isMounted = false;
   }
 
-  public execute(client: ApolloClient<object>): QueryResult<TData, TVariables> {
-    const { skip, query } = this.options;
-    if (this.previous.client !== client) {
-      if (this.previous.client) {
-        this.cleanup();
-      }
-
-      this.previous.client = client;
-    }
-
-    if (skip || query !== this.previous.query) {
-      this.removeQuerySubscription();
-      this.removeObservable(!skip);
-      this.previous.query = query;
-    }
-
-    this.updateObservableQuery(client);
-
-    return this.getExecuteSsrResult(client) || this.getExecuteResult(client);
+  // Called by RenderPromises
+  public getOptions(): QueryDataOptions<TData, TVariables> {
+    return this.options;
   }
 
-  // For server-side rendering
+  public setOptions(newOptions: QueryDataOptions<TData, TVariables>) {
+    if (!equal(this.options, newOptions)) {
+      this.previous.options = this.options;
+    }
+
+    this.options = newOptions;
+  }
+
+  // Called by RenderPromises
   public fetchData(): Promise<void> | boolean {
     const options = this.options;
     if (options.skip || options.ssr === false) return false;
     return new Promise(resolve => this.startQuerySubscription(resolve));
   }
 
-  public afterExecute() {
-    this.isMounted = true;
-    const options = this.options;
-    const ssrDisabled = options.ssr === false;
-    if (
-      this.currentObservable &&
-      !ssrDisabled &&
-      !this.ssrInitiated()
-    ) {
-      this.startQuerySubscription();
-    }
-
-    this.handleErrorOrCompleted();
-    return this.unmount.bind(this);
-  }
-
-  public cleanup() {
-    this.removeQuerySubscription();
-    this.removeObservable(true);
-    delete this.previous.result;
-  }
-
-
-  public ssrInitiated() {
+  private ssrInitiated() {
     return this.context && this.context.renderPromises;
   }
 
-  private getExecuteSsrResult(client: ApolloClient<object>) {
+  private getExecuteSsrResult(
+    client: ApolloClient<object>
+  ): QueryResult<TData, TVariables> | undefined {
     const { ssr, skip } = this.options;
     const ssrDisabled = ssr === false;
     const fetchDisabled = client.disableNetworkFetches;
@@ -183,6 +137,51 @@ class QueryData<TData, TVariables> {
     }
   }
 
+  public execute(client: ApolloClient<object>): QueryResult<TData, TVariables> {
+    const { skip, query } = this.options;
+    if (this.previous.client !== client) {
+      if (this.previous.client) {
+        this.__cleanup__();
+      }
+
+      this.previous.client = client;
+    }
+
+    if (skip || query !== this.previous.query) {
+      this.removeQuerySubscription();
+      this.removeObservable(!skip);
+      this.previous.query = query;
+    }
+
+    this.updateObservableQuery(client);
+
+    return this.getExecuteSsrResult(client) || this.getExecuteResult(client);
+  }
+
+  public afterExecute() {
+    this.isMounted = true;
+    const options = this.options;
+    const ssrDisabled = options.ssr === false;
+    if (
+      this.currentObservable &&
+      !ssrDisabled &&
+      !this.ssrInitiated()
+    ) {
+      this.startQuerySubscription();
+    }
+
+    this.handleErrorOrCompleted();
+    return () => {
+      this.isMounted = false;
+    };
+  }
+
+  public __cleanup__() {
+    this.removeQuerySubscription();
+    this.removeObservable(true);
+    delete this.previous.result;
+  }
+
   private prepareObservableQueryOptions(): ObservableQueryOptions<TData, TVariables> {
     const options = this.options;
     verifyDocumentType(options.query, DocumentType.Query);
@@ -207,8 +206,8 @@ class QueryData<TData, TVariables> {
 
   private initializeObservableQuery(client: ApolloClient<object>) {
     // See if there is an existing observable that was used to fetch the same
-    // data and if so, use it instead since it will contain the proper queryId
-    // to fetch the result set. This is used during SSR.
+    // data and if so, use it instead since it will contain the proper
+    // queryId to fetch the result set. This is used during SSR.
     if (this.ssrInitiated()) {
       this.currentObservable = this.context!.renderPromises!.getSSRObservable(
         this.options,
@@ -485,6 +484,7 @@ class QueryData<TData, TVariables> {
     }
   }
 
+  // observableQueryFields
   private obsRefetch = (variables?: Partial<TVariables>) =>
     this.currentObservable?.refetch(variables);
 
@@ -546,8 +546,10 @@ export function useQuery<TData = any, TVariables = OperationVariables>(
   );
 
   const [tick, forceUpdate] = useReducer(x => x + 1, 0);
-  const updatedOptions: QueryDataOptions<TData, TVariables>
-    = options ? { ...options, query } : { query };
+  const updatedOptions: QueryDataOptions<TData, TVariables> = {
+    ...options,
+    query,
+  };
 
   const queryDataRef = useRef<QueryData<TData, TVariables>>();
   const queryData = queryDataRef.current || (
@@ -555,11 +557,7 @@ export function useQuery<TData = any, TVariables = OperationVariables>(
       options: updatedOptions,
       context,
       onNewData() {
-        if (queryData.ssrInitiated()) {
-          // If we're rendering on the server side we can force an update at
-          // any point.
-          forceUpdate();
-        } else if (queryDataRef.current && queryDataRef.current.isMounted) {
+        if (queryDataRef.current && queryDataRef.current.isMounted) {
           forceUpdate();
         }
       }
@@ -573,8 +571,6 @@ export function useQuery<TData = any, TVariables = OperationVariables>(
     [updatedOptions, context, tick],
   );
 
-  const queryResult = (result as QueryResult<TData, TVariables>);
-
   if (__DEV__) {
     // ensure we run an update after refreshing so that we reinitialize
     useAfterFastRefresh(forceUpdate);
@@ -582,7 +578,7 @@ export function useQuery<TData = any, TVariables = OperationVariables>(
 
   useEffect(() => {
     return () => {
-      queryData.cleanup();
+      queryData.__cleanup__();
       // this effect can run multiple times during a fast-refresh
       // so make sure we clean up the ref
       queryDataRef.current = void 0;
@@ -590,10 +586,10 @@ export function useQuery<TData = any, TVariables = OperationVariables>(
   }, []);
 
   useEffect(() => queryData.afterExecute(), [
-    queryResult.loading,
-    queryResult.networkStatus,
-    queryResult.error,
-    queryResult.data,
+    result.loading,
+    result.networkStatus,
+    result.error,
+    result.data,
   ]);
 
   return result;

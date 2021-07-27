@@ -121,6 +121,7 @@ export class ObservableQuery<
         if (this.observers.delete(observer) && !this.observers.size) {
           this.tearDownQuery();
         }
+        console.trace();
       };
     });
 
